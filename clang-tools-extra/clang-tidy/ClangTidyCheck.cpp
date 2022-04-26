@@ -42,7 +42,63 @@ void ClangTidyCheck::run(const ast_matchers::MatchFinder::MatchResult &Result) {
   // For historical reasons, checks don't implement the MatchFinder run()
   // callback directly. We keep the run()/check() distinction to avoid interface
   // churn, and to allow us to add cross-cutting logic in the future.
-  check(Result);
+
+  switch (getPhase()) {
+  case MultipassProjectPhase::Diagnose:
+    check(Result);
+    break;
+  case MultipassProjectPhase::Collect:
+    collect(Result);
+    break;
+  case MultipassProjectPhase::Compact:
+    llvm_unreachable("AST Matchers should not have run in compact mode.");
+  }
+}
+
+void ClangTidyCheck::runCompact() {
+  using namespace llvm::sys::fs;
+  using namespace llvm::sys::path;
+
+  std::vector<std::string> Inputs;
+  StringRef OutputPath = getCompactedDataPath();
+  StringRef OutputFilename = filename(OutputPath);
+
+  std::error_code EC;
+  for (auto It = directory_iterator(
+           Context->getGlobalOptions().MultipassDirectory, EC);
+       It != directory_iterator(); It.increment(EC)) {
+    if (EC)
+      continue;
+
+    StringRef Filename = filename(It->path());
+    if (Filename.startswith(this->CheckName) && Filename != OutputFilename)
+      Inputs.push_back(It->path());
+  }
+
+  compact(Inputs, OutputPath);
+}
+
+void ClangTidyCheck::runPostCollect() {
+  // FIXME: Hash does not respect multiple compilations of the same file with
+  // different compile flags.
+  assert(getPhase() == MultipassProjectPhase::Collect &&
+         "postCollect() in wrong phase.");
+  postCollect(getCollectPath());
+}
+
+std::string ClangTidyCheck::getCollectPath() {
+  using namespace llvm::sys::path;
+  assert(getPhase() == MultipassProjectPhase::Collect &&
+         "getCollectPath() in wrong phase.");
+
+  SmallString<256> Filename;
+  llvm::raw_svector_ostream OS{Filename};
+  StringRef CurrentFile = Context->getCurrentFile();
+  OS << Context->getGlobalOptions().MultipassDirectory << get_separator()
+     << CheckName << '.' << filename(CurrentFile) << '.'
+     << hash_value(CurrentFile) << ".yaml";
+
+  return Filename.str().str();
 }
 
 ClangTidyCheck::OptionsView::OptionsView(

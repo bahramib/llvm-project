@@ -106,6 +106,10 @@ Improvements to clang-tidy
   means it is advised to use YAML's block style initiated by the pipe character `|` for the `Checks`
   section in order to benefit from the easier syntax that works without commas.
 
+- Added the infrastructure support for checks to be executed in multiple phases
+  to facilitate analysis with project-level information. Such analysis is not
+  the default, and not all checks support it.
+
 New checks
 ^^^^^^^^^^
 

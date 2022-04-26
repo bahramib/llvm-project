@@ -111,6 +111,26 @@ public:
   /// work in here.
   virtual void check(const ast_matchers::MatchFinder::MatchResult &Result) {}
 
+  /// ``ClangTidyChecks`` that register ASTMatchers should do the actual work
+  /// for registering per-TU data to the project-level collection in here.
+  virtual void collect(const ast_matchers::MatchFinder::MatchResult &Result) {}
+
+  /// Checks that performed ``collect`` should write their data to the output to
+  /// the file in here.
+  virtual void postCollect(StringRef OutFile) {}
+
+  /// Execute the ``postCollect()`` function to the right, automatically
+  /// generated filename.
+  void runPostCollect();
+
+  /// In the ``compact`` phase, checks that are supporting such should reduce
+  /// the data received from all the TUs into a single file.
+  virtual void compact(const std::vector<std::string> &PerTUCollectedDataFiles,
+                       StringRef OutFile) {}
+
+  /// Gather the list of per-TU files from the context, and execute ``compact``.
+  void runCompact();
+
   /// Add a diagnostic with the check's name.
   DiagnosticBuilder diag(SourceLocation Loc, StringRef Description,
                          DiagnosticIDs::Level Level = DiagnosticIDs::Warning);
@@ -421,6 +441,18 @@ protected:
   /// applied at a time.
   bool areDiagsSelfContained() const {
     return Context->areDiagsSelfContained();
+  }
+  /// Returns the path where the current check should write collected data to.
+  std::string getCollectPath();
+  /// Returns the file where the current check should write or read compacted
+  /// data to/from.
+  StringRef getCompactedDataPath() const {
+    return Context->getCompactedDataPath(CheckName);
+  }
+  /// Returns the current phase of execution in a multi-pass project-level
+  /// system.
+  MultipassProjectPhase getPhase() const {
+    return Context->getGlobalOptions().MultipassPhase;
   }
 };
 

@@ -227,6 +227,32 @@ An overview of all the command-line options:
                                      complete list of passes, use the
                                      :option:`--list-checks` and
                                      :option:`-load` options together.
+  --multipass-dir=<string>       -
+                                   When executing project-level analysis, specify
+                                   a directory where data can be stored inbetween
+                                   phases.
+  --multipass-phase=<value>      -
+                                   When executing project-level analysis, specify
+                                   which phase of the analysis to run. Multi-pass
+                                   project-level analysis requires the execution
+                                   of 3 passes in sequence. Not all checks support
+                                   this feature.
+    =collect                     -
+                                     Collect per-TU analysis data from checks that are
+                                     capable of multi-pass analysis.
+
+                                     This pass can be executed in parallel.
+    =compact                     -
+                                     Transform the per-TU data into a single project-level
+                                     data to be consumed for diagnostics.
+
+                                     This pass CAN NOT be executed in parallel!
+    =diagnose                    -
+                                     Emit diagnostics of the code, using the previously
+                                     collected and compacted data, or with per-TU data
+                                     only for single-pass analysis analysis.
+
+                                     This pass can be executed in parallel.
     -p=<string>                    - Build path
     --quiet                        -
                                      Run clang-tidy in quiet mode. This suppresses
@@ -417,6 +443,45 @@ example, ``NOLINTBEGIN(check-name)`` can be paired with
 ``NOLINTEND(check-name)`` but not with ``NOLINTEND`` `(zero arguments)`.
 :program:`clang-tidy` will generate a ``clang-tidy-nolint`` error diagnostic if
 any ``NOLINTBEGIN``/``NOLINTEND`` comment violates these requirements.
+
+Project-level analysis
+======================
+
+By default, Clang-Tidy runs checks on every translation unit of the project
+separately.
+Some checks, however, might benefit from and give better or more meaningful
+results, or only work, when executed not for a single file, but for the entire
+project.
+The **multi-pass** analysis can be used in this case, with which checks can first
+`collect` information into a temporary data location (``--multipass-dir``) on the
+disk, `compact` per-TU data into project-level data, and `diagnose` with the
+project-level data in mind.
+The phase is selected by passing the appropriate value to the
+``--multipass-phase`` command-line parameter.
+
+Whether a check supports project-level analysis, and how project-level data is
+stored and transformed from per-TU to "global" values is specific to each
+individual check.
+
+.. code-block:: bash
+    $ clang-tidy --checks=... file1.cpp file2.cpp
+
+    $ clang-tidy --checks=... --multipass-phase=collect --multipass-dir="TidyData" file1.cpp file2.cpp
+    # No output to the terminal.
+    $ ls ./TidyData
+    blah.file1.cpp.01234567.yaml
+    blah.file2.cpp.89abcdef.yaml
+
+    $ clang-tidy --checks=... --multipass-phase=compact --multipass-dir="TidyData"
+    # No file list required to be specified.
+    # No output to the terminal.
+    $ ls ./TidyData
+    blah.file1.cpp.01234567.yaml
+    blah.file2.cpp.89abcdef.yaml
+    blah.yaml
+
+    $ clang-tidy --checks=... --multipass-phase=compact --multipass-dir="TidyData" file1.cpp file2.cpp
+    # Diagnostics that use project-level data.
 
 .. _LibTooling: https://clang.llvm.org/docs/LibTooling.html
 .. _How To Setup Tooling For LLVM: https://clang.llvm.org/docs/HowToSetupToolingForLLVM.html
