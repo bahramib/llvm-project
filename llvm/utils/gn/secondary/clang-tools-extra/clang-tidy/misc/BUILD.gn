@@ -15,6 +15,7 @@ static_library("misc") {
   ]
   sources = [
     "DefinitionsInHeadersCheck.cpp",
+    "DiscardedReturnValueCheck.cpp",
     "MiscTidyModule.cpp",
     "MisleadingBidirectional.cpp",
     "MisleadingIdentifier.cpp",

@@ -119,6 +119,12 @@ New checks
    Warns when the code is unwrapping a `std::optional<T>`, `absl::optional<T>`,
    or `base::Optional<T>` object without assuring that it contains a value.
 
+- New :doc:`misc-discarded-return-value <clang-tidy/checks/misc-discarded-return-value>`
+  check.
+
+  Flags function calls which return value is discarded if most of the other calls
+  to the function consume the return value.
+
 - New :doc:`modernize-macro-to-enum
   <clang-tidy/checks/modernize-macro-to-enum>` check.
 
