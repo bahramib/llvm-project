@@ -9,10 +9,103 @@
 #include "DiscardedReturnValueCheck.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "clang/Index/USRGeneration.h"
+#include "llvm/Support/YAMLParser.h"
+#include "llvm/Support/YAMLTraits.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
 using namespace clang::ast_matchers;
 using namespace clang::tidy::misc;
+
+namespace {
+
+/// The format of the YAML document the checker uses in multi-pass project-level
+/// mode. This is the same for the per-TU and the per-project data.
+struct SerializedFunction {
+  std::string ID;
+  std::size_t ConsumedCalls, TotalCalls;
+};
+using FunctionVec = std::vector<SerializedFunction>;
+
+} // namespace
+
+namespace llvm {
+namespace yaml {
+
+template <> struct MappingTraits<SerializedFunction> {
+  static void mapping(IO &IO, SerializedFunction &F) {
+    IO.mapRequired("ID", F.ID);
+    IO.mapRequired("Consumed", F.ConsumedCalls);
+    IO.mapRequired("Total", F.TotalCalls);
+  }
+};
+
+} // namespace yaml
+} // namespace llvm
+
+LLVM_YAML_IS_SEQUENCE_VECTOR(SerializedFunction)
+
+static Optional<FunctionVec> loadYAML(StringRef File) {
+  using namespace llvm;
+
+  ErrorOr<std::unique_ptr<MemoryBuffer>> IStream =
+      MemoryBuffer::getFileAsStream(File);
+  if (!IStream)
+    return None;
+
+  FunctionVec R;
+  yaml::Input YIn{**IStream};
+  YIn >> R;
+
+  return R;
+}
+
+static bool loadYAML(StringRef FromFile,
+                     DiscardedReturnValueCheck::FunctionMapTy &ToMap) {
+  Optional<FunctionVec> OV = loadYAML(FromFile);
+  if (!OV)
+    return false;
+
+  for (const SerializedFunction &SF : *OV) {
+    DiscardedReturnValueCheck::FunctionInfo &F =
+        ToMap
+            .try_emplace(
+                SF.ID,
+                DiscardedReturnValueCheck::FunctionInfo{0, 0, nullptr, {}})
+            .first->second;
+
+    F.ConsumedCalls += SF.ConsumedCalls;
+    F.TotalCalls += SF.TotalCalls;
+  }
+
+  return true;
+}
+
+static FunctionVec
+yamlize(const DiscardedReturnValueCheck::FunctionMapTy &Map) {
+  FunctionVec SFs;
+  llvm::transform(Map, std::back_inserter(SFs), [](auto &&E) {
+    return SerializedFunction{E.first().str(), E.second.ConsumedCalls,
+                              E.second.TotalCalls};
+  });
+  return SFs;
+}
+
+static void writeYAML(StringRef Whence, FunctionVec Elements,
+                      StringRef ToFile) {
+  std::error_code EC;
+  llvm::raw_fd_ostream FS(ToFile, EC, llvm::sys::fs::OF_Text);
+  if (EC) {
+    llvm::errs() << "DiscardedReturnValueCheck: Failed to write " << Whence
+                 << " output file: " << EC.message();
+    llvm::report_fatal_error("", false);
+    return;
+  }
+
+  llvm::yaml::Output YAMLOut(FS);
+  YAMLOut << Elements;
+}
 
 static constexpr llvm::StringLiteral Call = "call";
 static constexpr llvm::StringLiteral Consume = "consume";
@@ -32,11 +125,34 @@ std::uint8_t DiscardedReturnValueCheck::FunctionInfo::ratio() const {
 
 void DiscardedReturnValueCheck::registerCall(const CallExpr *CE,
                                              const FunctionDecl *FD,
+                                             bool IncrementCounters,
                                              const void *ConsumingContext) {
   assert(CE && FD);
   FD = FD->getCanonicalDecl();
-  FunctionInfo &Data =
-      CallMap.try_emplace(FD, FunctionInfo{0, 0, {}}).first->second;
+  auto &Data = [this, FD]() -> FunctionInfo & {
+    auto IDIt = FunctionIDs.find(FD);
+    if (IDIt == FunctionIDs.end()) {
+      SmallString<128> ID;
+      bool USRFailure = clang::index::generateUSRForDecl(FD, ID);
+      if (USRFailure)
+        ID = FD->getDeclName().getAsString();
+      assert(!ID.empty() && "Generating name for function failed");
+
+      IDIt = FunctionIDs.try_emplace(FD, ID.str().str()).first;
+    }
+    assert(IDIt != FunctionIDs.end());
+
+    FunctionInfo &Data =
+        FunctionInfos.try_emplace(IDIt->second, FunctionInfo{0, 0, FD, {}})
+            .first->second;
+
+    return Data;
+  }();
+
+  if (!Data.FD)
+    // If the map already contains data which was loaded from an earlier project
+    // pass, store FD (in the current TU) so diagose() can point to it properly.
+    Data.FD = FD;
 
   if (ConsumingContext) {
     using ConsumeVecTy = decltype(ConsumedCalls)::mapped_type;
@@ -48,13 +164,14 @@ void DiscardedReturnValueCheck::registerCall(const CallExpr *CE,
   } else
     Data.DiscardedCEs.insert(CE);
 
-  if (ConsumingContext)
-    ++Data.ConsumedCalls;
-  ++Data.TotalCalls;
+  if (IncrementCounters) {
+    if (ConsumingContext)
+      ++Data.ConsumedCalls;
+    ++Data.TotalCalls;
+  }
 }
 
-void DiscardedReturnValueCheck::diagnose(const FunctionDecl *FD,
-                                         const FunctionInfo &F) {
+void DiscardedReturnValueCheck::diagnose(const FunctionInfo &F) {
   if (F.ratio() < ConsumeThreshold)
     return;
 
@@ -62,7 +179,7 @@ void DiscardedReturnValueCheck::diagnose(const FunctionDecl *FD,
     diag(Call->getExprLoc(),
          "return value of %0 is used in most calls, but not in this one",
          DiagnosticIDs::Warning)
-        << FD << F.ratio() << F.ConsumedCalls << F.TotalCalls;
+        << F.FD << F.ratio() << F.ConsumedCalls << F.TotalCalls;
 
     diag(Call->getExprLoc(),
          "value consumed or checked in %0%% (%1 out of %2) of cases",
@@ -82,14 +199,17 @@ void DiscardedReturnValueCheck::storeOptions(
 }
 
 void DiscardedReturnValueCheck::onStartOfTranslationUnit() {
+  CacheProjectDataLoadedSuccessfully.reset();
   ConsumedCalls.clear();
-  CallMap.clear();
+  FunctionInfos.clear();
+  FunctionIDs.clear();
 }
 
 void DiscardedReturnValueCheck::onEndOfTranslationUnit() {
   // Once everything had been counted, emit the results.
-  for (const auto &Call : CallMap)
-    diagnose(Call.first, Call.second);
+  if (getPhase() == MultipassProjectPhase::Diagnose)
+    for (const auto &Call : FunctionInfos)
+      diagnose(Call.second);
 }
 
 namespace {
@@ -178,7 +298,8 @@ void DiscardedReturnValueCheck::registerMatchers(MatchFinder *Finder) {
   Finder->addMatcher(traverse(TK_IgnoreUnlessSpelledInSource, Call), this);
 }
 
-void DiscardedReturnValueCheck::check(const MatchFinder::MatchResult &Result) {
+void DiscardedReturnValueCheck::matchResult(
+    const MatchFinder::MatchResult &Result, bool ShouldCount) {
   const auto *CE = Result.Nodes.getNodeAs<CallExpr>(Call);
   assert(CE && "Bad matcher");
 
@@ -193,13 +314,51 @@ void DiscardedReturnValueCheck::check(const MatchFinder::MatchResult &Result) {
   if (const auto *T = Result.Nodes.getNodeAs<Type>(Consume))
     ConsumeNode = T;
   if (ConsumeNode)
-    return registerCall(CE, CE->getDirectCallee(), ConsumeNode);
+    return registerCall(CE, CE->getDirectCallee(), ShouldCount, ConsumeNode);
 
   // If ConsumeNode is left to be nullptr, the current match is not through the
   // "consuming" matcher. It might be the only match of this function (and then
   // it is discarded), or it might have been matched earlier and consumed.
   if (ConsumedCalls.find(CE) == ConsumedCalls.end())
-    return registerCall(CE, CE->getDirectCallee(), nullptr);
+    return registerCall(CE, CE->getDirectCallee(), ShouldCount, nullptr);
+}
+
+void DiscardedReturnValueCheck::collect(
+    const ast_matchers::MatchFinder::MatchResult &Result) {
+  matchResult(Result, true);
+}
+
+void DiscardedReturnValueCheck::check(const MatchFinder::MatchResult &Result) {
+  // check() might be called without previous data existing if Tidy is executed
+  // in single-phase mode.
+  if (!CacheProjectDataLoadedSuccessfully.hasValue()) {
+    StringRef ProjectLevelData = getCompactedDataPath();
+    bool Success = false;
+    if (!ProjectLevelData.empty() && FunctionInfos.empty())
+      Success = loadYAML(ProjectLevelData, FunctionInfos);
+
+    CacheProjectDataLoadedSuccessfully.emplace(Success);
+  }
+  // If there was previously loaded data, the current match callback should
+  // not invalidate the counters we just loaded.
+  bool ShouldCountMatches = !CacheProjectDataLoadedSuccessfully.getValue();
+
+  matchResult(Result, ShouldCountMatches);
+}
+
+void DiscardedReturnValueCheck::postCollect(StringRef OutputFilename) {
+  writeYAML("postCollect()", yamlize(FunctionInfos), OutputFilename);
+}
+
+void DiscardedReturnValueCheck::compact(
+    const std::vector<std::string> &PerTUCollectedData, StringRef OutputFile) {
+  for (const std::string &PerTUFilename : PerTUCollectedData)
+    if (!loadYAML(PerTUFilename, FunctionInfos))
+      llvm::errs()
+          << "DiscardedReturnValueCheck: Failed to load compact() input file "
+          << PerTUFilename << ".\n";
+
+  writeYAML("compact()", yamlize(FunctionInfos), OutputFile);
 }
 
 } // namespace misc

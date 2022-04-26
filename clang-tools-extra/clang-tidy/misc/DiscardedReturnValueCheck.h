@@ -12,6 +12,7 @@
 #include "../ClangTidyCheck.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/StringMap.h"
 #include <cinttypes>
 
 namespace clang {
@@ -28,18 +29,23 @@ public:
   struct FunctionInfo {
     std::size_t ConsumedCalls;
     std::size_t TotalCalls;
+    const FunctionDecl *FD;
     llvm::SmallPtrSet<const CallExpr *, 32> DiscardedCEs;
 
     /// Returns ConsumedCalls / TotalCalls expressed as a whole percentage.
     std::uint8_t ratio() const;
   };
-  using FunctionMapTy = llvm::DenseMap<const FunctionDecl *, FunctionInfo>;
+  using FunctionMapTy = llvm::StringMap<FunctionInfo>;
 
   DiscardedReturnValueCheck(StringRef Name, ClangTidyContext *Context);
   void registerMatchers(ast_matchers::MatchFinder *Finder) override;
   void storeOptions(ClangTidyOptions::OptionMap &Opts) override;
   void onStartOfTranslationUnit() override;
   void onEndOfTranslationUnit() override;
+  void collect(const ast_matchers::MatchFinder::MatchResult &Result) override;
+  void postCollect(StringRef OutputFile) override;
+  void compact(const std::vector<std::string> &PerTuCollectedData,
+               StringRef OutputFile) override;
   void check(const ast_matchers::MatchFinder::MatchResult &Result) override;
 
 private:
@@ -49,16 +55,27 @@ private:
   /// the remaining 2 will be warned.
   const std::uint8_t ConsumeThreshold;
 
+  /// Contains whether during diagnostics the data was loaded from a serialized
+  /// project-level file created by compact().
+  /// (This is only used as a result cache so no several rounds of lookup is
+  /// made.)
+  Optional<bool> CacheProjectDataLoadedSuccessfully;
+
   /// Stores AST nodes which we have observed to be consuming calls.
   /// (This is a helper data structure to prevent matchers matching consuming
   /// contexts firing multiple times and messing up the statistics created.)
   llvm::DenseMap<const CallExpr *, SmallVector<const void *, 2>> ConsumedCalls;
 
-  FunctionMapTy CallMap;
+  /// Maps function declarations to the identifier keys used in the lookup.
+  llvm::DenseMap<const FunctionDecl *, std::string> FunctionIDs;
+  /// Maps generated function "identifiers" to \p FunctionInfo data entries.
+  FunctionMapTy FunctionInfos;
 
+  void matchResult(const ast_matchers::MatchFinder::MatchResult &Result,
+                   bool ShouldCount);
   void registerCall(const CallExpr *CE, const FunctionDecl *FD,
-                    const void *ConsumingContext);
-  void diagnose(const FunctionDecl *FD, const FunctionInfo &F);
+                    bool IncrementCounters, const void *ConsumingContext);
+  void diagnose(const FunctionInfo &F);
 };
 
 } // namespace misc
