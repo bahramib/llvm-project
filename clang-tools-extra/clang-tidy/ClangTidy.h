@@ -82,6 +82,10 @@ runClangTidy(clang::tidy::ClangTidyContext &Context,
              bool ApplyAnyFix, bool EnableCheckProfile = false,
              llvm::StringRef StoreCheckProfile = StringRef());
 
+/// Run the multi-pass project-level "compact" routine of checks that support
+/// such on the data available in the Context.
+void runClangTidyCompactPhase(clang::tidy::ClangTidyContext &Context);
+
 /// Controls what kind of fixes clang-tidy is allowed to apply.
 enum FixBehaviour {
   /// Don't try to apply any fix.

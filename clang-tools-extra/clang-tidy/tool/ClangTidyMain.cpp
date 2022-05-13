@@ -129,10 +129,10 @@ well.
                                cl::init(false), cl::cat(ClangTidyCategory));
 
 static cl::opt<bool> FixNotes("fix-notes", cl::desc(R"(
-If a warning has no fix, but a single fix can 
-be found through an associated diagnostic note, 
-apply the fix. 
-Specifying this flag will implicitly enable the 
+If a warning has no fix, but a single fix can
+be found through an associated diagnostic note,
+apply the fix.
+Specifying this flag will implicitly enable the
 '--fix' flag.
 )"),
                               cl::init(false), cl::cat(ClangTidyCategory));
@@ -257,8 +257,54 @@ This option overrides the 'UseColor' option in
 )"),
                               cl::init(false), cl::cat(ClangTidyCategory));
 
+static cl::opt<clang::tidy::MultipassProjectPhase> MultipassPhase(
+    "multipass-phase", cl::desc(R"(
+When executing project-level analysis, specify
+which phase of the analysis to run. Multi-pass
+project-level analysis requires the execution
+of 3 passes in sequence. Not all checks support
+this feature.
+)"),
+    cl::values(
+        clEnumValN(clang::tidy::MultipassProjectPhase::Collect, "collect", R"(
+Collect per-TU analysis data from checks that are
+capable of multi-pass analysis.
+This pass can be executed in parallel.
+)"),
+        clEnumValN(clang::tidy::MultipassProjectPhase::Compact, "compact", R"(
+Transform the per-TU data into a single project-level
+data to be consumed for diagnostics.
+This pass CAN NOT be executed in parallel!
+)"),
+        clEnumValN(clang::tidy::MultipassProjectPhase::Diagnose, "diagnose", R"(
+Emit diagnostics of the code, using the previously
+collected and compacted data, or with per-TU data
+only for single-pass analysis analysis.
+This pass can be executed in parallel.
+)")),
+    cl::init(clang::tidy::MultipassProjectPhase::Diagnose),
+    cl::cat(ClangTidyCategory));
+
+static cl::opt<std::string> MultipassDirectory("multipass-dir", cl::desc(R"(
+When executing project-level analysis, specify
+a directory where data can be stored inbetween
+phases.
+)"),
+                                               cl::cat(ClangTidyCategory));
+
 namespace clang {
 namespace tidy {
+
+static SmallString<256> makeAbsolute(const std::string &Input) {
+  if (Input.empty())
+    return {};
+  SmallString<256> AbsolutePath(Input);
+  if (std::error_code EC = llvm::sys::fs::make_absolute(AbsolutePath)) {
+    llvm::errs() << "Can't make absolute path from " << Input << ": "
+                 << EC.message() << "\n";
+  }
+  return AbsolutePath;
+}
 
 static void printStats(const ClangTidyStats &Stats) {
   if (Stats.errorsIgnored()) {
@@ -296,6 +342,12 @@ static std::unique_ptr<ClangTidyOptionsProvider> createOptionsProvider(
     llvm::cl::PrintHelpMessage(/*Hidden=*/false, /*Categorized=*/true);
     return nullptr;
   }
+
+  GlobalOptions.MultipassPhase = MultipassPhase;
+
+  SmallString<256> MultipassDirAbsolute = makeAbsolute(MultipassDirectory);
+  GlobalOptions.MultipassDirectory =
+      makeAbsolute(MultipassDirectory).str().str();
 
   ClangTidyOptions DefaultOptions;
   DefaultOptions.Checks = DefaultChecks;
@@ -416,18 +468,7 @@ int clangTidyMain(int argc, const char **argv) {
   if (!OptionsProvider)
     return 1;
 
-  auto MakeAbsolute = [](const std::string &Input) -> SmallString<256> {
-    if (Input.empty())
-      return {};
-    SmallString<256> AbsolutePath(Input);
-    if (std::error_code EC = llvm::sys::fs::make_absolute(AbsolutePath)) {
-      llvm::errs() << "Can't make absolute path from " << Input << ": "
-                   << EC.message() << "\n";
-    }
-    return AbsolutePath;
-  };
-
-  SmallString<256> ProfilePrefix = MakeAbsolute(StoreCheckProfile);
+  SmallString<256> ProfilePrefix = makeAbsolute(StoreCheckProfile);
 
   StringRef FileName("dummy");
   auto PathList = OptionsParser->getSourcePathList();
@@ -435,7 +476,7 @@ int clangTidyMain(int argc, const char **argv) {
     FileName = PathList.front();
   }
 
-  SmallString<256> FilePath = MakeAbsolute(std::string(FileName));
+  SmallString<256> FilePath = makeAbsolute(std::string(FileName));
 
   ClangTidyOptions EffectiveOptions = OptionsProvider->getOptions(FilePath);
   std::vector<std::string> EnabledChecks =
@@ -484,10 +525,32 @@ int clangTidyMain(int argc, const char **argv) {
     return 1;
   }
 
+  MultipassProjectPhase Phase =
+      OptionsProvider->getGlobalOptions().MultipassPhase;
+  if (Phase == MultipassProjectPhase::Compact) {
+    ClangTidyContext Context(std::move(OwningOptionsProvider),
+                             AllowEnablingAnalyzerAlphaCheckers);
+    runClangTidyCompactPhase(Context);
+    return 0;
+  }
+
   if (PathList.empty()) {
     llvm::errs() << "Error: no input files specified.\n";
     llvm::cl::PrintHelpMessage(/*Hidden=*/false, /*Categorized=*/true);
     return 1;
+  }
+
+  const std::string &MultipassDir =
+      OptionsProvider->getGlobalOptions().MultipassDirectory;
+  if (Phase == MultipassProjectPhase::Collect ||
+      Phase == MultipassProjectPhase::Compact) {
+    if (MultipassDir.empty()) {
+      llvm::errs() << "Error: --multipass-phase 'collect' or 'compact' given, "
+                      "but no '--multipass-dir' set.\n";
+      return 1;
+    }
+    if (!llvm::sys::fs::is_directory(MultipassDir))
+      llvm::sys::fs::create_directory(MultipassDir);
   }
 
   llvm::InitializeAllTargetInfos();

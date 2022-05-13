@@ -201,6 +201,10 @@ public:
             DiagEngine->getDiagnosticIDs()->getDescription(DiagnosticID)));
   }
 
+  /// Returns the file where a check should write or read compacted data
+  /// to/from.
+  StringRef getCompactedDataPath(StringRef CheckName);
+
 private:
   // Writes to Stats.
   friend class ClangTidyDiagnosticConsumer;
@@ -230,6 +234,8 @@ private:
   bool SelfContainedDiags;
 
   NoLintDirectiveHandler NoLintHandler;
+
+  llvm::DenseMap<StringRef, std::string> CompactedDataPaths;
 };
 
 /// Gets the Fix attached to \p Diagnostic.

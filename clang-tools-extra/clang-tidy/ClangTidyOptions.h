@@ -25,6 +25,19 @@
 namespace clang {
 namespace tidy {
 
+/// When executing multi-pass project-level analysis, identifies the phase the
+/// current process is configured for.
+enum class MultipassProjectPhase {
+  /// In the collection phase, checks capable for project-level analysis emit
+  /// analysis data.
+  Collect,
+  /// Create a full project-level data file that diagnosis can use.
+  Compact,
+  /// Emit diagnostics from the checks. (This is the default value in
+  /// single-phase mode.)
+  Diagnose
+};
+
 /// Contains a list of line ranges in a single file.
 struct FileFilter {
   /// File name.
@@ -43,6 +56,12 @@ struct ClangTidyGlobalOptions {
   /// Output warnings from certain line ranges of certain files only.
   /// If empty, no warnings will be filtered.
   std::vector<FileFilter> LineFilter;
+
+  /// The current execution phase if multi-pass project-level analysis is
+  /// enabled. Otherwise, the normal single-pass diagnosis-only phase.
+  MultipassProjectPhase MultipassPhase = MultipassProjectPhase::Diagnose;
+  /// The directory where multi-pass project-level analysis stores its data to.
+  std::string MultipassDirectory;
 };
 
 /// Contains options for clang-tidy. These options may be read from

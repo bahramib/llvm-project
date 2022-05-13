@@ -305,35 +305,49 @@ private:
   unsigned WarningsAsErrors;
 };
 
+using CheckVec = ClangTidyCheckFactories::CheckVec;
+
 class ClangTidyASTConsumer : public MultiplexConsumer {
 public:
   ClangTidyASTConsumer(std::vector<std::unique_ptr<ASTConsumer>> Consumers,
                        std::unique_ptr<ClangTidyProfiling> Profiling,
                        std::unique_ptr<ast_matchers::MatchFinder> Finder,
-                       std::vector<std::unique_ptr<ClangTidyCheck>> Checks)
+                       CheckVec Checks, MultipassProjectPhase MultipassPhase)
       : MultiplexConsumer(std::move(Consumers)),
         Profiling(std::move(Profiling)), Finder(std::move(Finder)),
-        Checks(std::move(Checks)) {}
+        Checks(std::move(Checks)), MultipassPhase(MultipassPhase) {}
+
+  ~ClangTidyASTConsumer() {
+    if (MultipassPhase == MultipassProjectPhase::Collect)
+      // Allow the checks to write their data at the end of execution.
+      for (auto &Check : Checks)
+        Check->runPostCollect();
+  }
 
 private:
   // Destructor order matters! Profiling must be destructed last.
   // Or at least after Finder.
   std::unique_ptr<ClangTidyProfiling> Profiling;
   std::unique_ptr<ast_matchers::MatchFinder> Finder;
-  std::vector<std::unique_ptr<ClangTidyCheck>> Checks;
+  CheckVec Checks;
+  MultipassProjectPhase MultipassPhase;
 };
 
 } // namespace
+
+static void instantiateTidyModules(ClangTidyCheckFactories &CheckFactories) {
+  for (ClangTidyModuleRegistry::entry E : ClangTidyModuleRegistry::entries()) {
+    std::unique_ptr<ClangTidyModule> M = E.instantiate();
+    M->addCheckFactories(CheckFactories);
+  }
+}
 
 ClangTidyASTConsumerFactory::ClangTidyASTConsumerFactory(
     ClangTidyContext &Context,
     IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> OverlayFS)
     : Context(Context), OverlayFS(std::move(OverlayFS)),
       CheckFactories(new ClangTidyCheckFactories) {
-  for (ClangTidyModuleRegistry::entry E : ClangTidyModuleRegistry::entries()) {
-    std::unique_ptr<ClangTidyModule> Module = E.instantiate();
-    Module->addCheckFactories(*CheckFactories);
-  }
+  instantiateTidyModules(*CheckFactories);
 }
 
 #if CLANG_TIDY_ENABLE_STATIC_ANALYZER
@@ -401,8 +415,7 @@ ClangTidyASTConsumerFactory::createASTConsumer(
   if (WorkingDir)
     Context.setCurrentBuildDirectory(WorkingDir.get());
 
-  std::vector<std::unique_ptr<ClangTidyCheck>> Checks =
-      CheckFactories->createChecksForLanguage(&Context);
+  CheckVec Checks = CheckFactories->createChecksForLanguage(&Context);
 
   ast_matchers::MatchFinder::MatchFinderOptions FinderOptions;
 
@@ -454,7 +467,7 @@ ClangTidyASTConsumerFactory::createASTConsumer(
 #endif // CLANG_TIDY_ENABLE_STATIC_ANALYZER
   return std::make_unique<ClangTidyASTConsumer>(
       std::move(Consumers), std::move(Profiling), std::move(Finder),
-      std::move(Checks));
+      std::move(Checks), Context.getGlobalOptions().MultipassPhase);
 }
 
 std::vector<std::string> ClangTidyASTConsumerFactory::getCheckNames() {
@@ -476,8 +489,7 @@ std::vector<std::string> ClangTidyASTConsumerFactory::getCheckNames() {
 
 ClangTidyOptions::OptionMap ClangTidyASTConsumerFactory::getCheckOptions() {
   ClangTidyOptions::OptionMap Options;
-  std::vector<std::unique_ptr<ClangTidyCheck>> Checks =
-      CheckFactories->createChecks(&Context);
+  CheckVec Checks = CheckFactories->createChecks(&Context);
   for (const auto &Check : Checks)
     Check->storeOptions(Options);
   return Options;
@@ -503,6 +515,15 @@ getCheckOptions(const ClangTidyOptions &Options,
       AllowEnablingAnalyzerAlphaCheckers);
   ClangTidyASTConsumerFactory Factory(Context);
   return Factory.getCheckOptions();
+}
+
+void runClangTidyCompactPhase(clang::tidy::ClangTidyContext &Context) {
+  std::unique_ptr<ClangTidyCheckFactories> CheckFactories(
+      new ClangTidyCheckFactories());
+  instantiateTidyModules(*CheckFactories);
+  CheckVec Checks = CheckFactories->createChecks(&Context);
+  for (auto &Check : Checks)
+    Check->runCompact();
 }
 
 std::vector<ClangTidyError>

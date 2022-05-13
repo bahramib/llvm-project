@@ -234,6 +234,35 @@ void ClangTidyContext::setASTContext(ASTContext *Context) {
   LangOpts = Context->getLangOpts();
 }
 
+StringRef ClangTidyContext::getCompactedDataPath(StringRef CheckName) {
+  using namespace llvm::sys::fs;
+  using namespace llvm::sys::path;
+
+  MultipassProjectPhase Phase = getGlobalOptions().MultipassPhase;
+  if (Phase == MultipassProjectPhase::Collect)
+    llvm_unreachable("Invalid phase 'Collect' for accessing compacted data");
+
+  auto InsertResult = CompactedDataPaths.try_emplace(CheckName, "");
+  std::string &FilePath = InsertResult.first->second;
+  if (!InsertResult.second)
+    return FilePath;
+
+  SmallString<128> OutputFile;
+  llvm::raw_svector_ostream OS{OutputFile};
+  OS << getGlobalOptions().MultipassDirectory << get_separator() << CheckName
+     << ".yaml";
+
+  if (Phase == MultipassProjectPhase::Compact)
+    // The file will be written, and thus, created.
+    FilePath = OutputFile.str().str();
+  else if (Phase == MultipassProjectPhase::Diagnose)
+    if (llvm::sys::fs::exists(OutputFile))
+      // If the file doesn't exist, leave it as empty string.
+      FilePath = OutputFile.str().str();
+
+  return FilePath;
+}
+
 const ClangTidyGlobalOptions &ClangTidyContext::getGlobalOptions() const {
   return OptionsProvider->getGlobalOptions();
 }
