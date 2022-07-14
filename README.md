@@ -43,7 +43,6 @@ If you set 80% threshold and have a TU with 5 out of 5 consumed calls to a funct
 Because the latter does not hit the 80% threshold, no warnings will be produced, while *on the project level*, 5 + 3 = 8 consumed calls out of 5 + 5 = 10 call sites would exactly be 80%.
 Simply put, had you been running Clang-Tidy on a unity build[^1] translation unit, you would have gotten the warnings.
 
-[^1]: [Unity build](http://enwp.org/Unity_build) is a technique where the entire project is formatted into a **single** translation unit (or a very small number of translation units), which is then compiled. This usually allows for more optimisations to take place.
 
 This problem is trivially extended to project-level information: if we are able to reliably identify the "same function" across multiple TUs, we can add up the calls (checked and discarded) to the function, and produce diagnostics based on a threshold calculated for the entirety of the input project.
 
@@ -54,6 +53,7 @@ This check is the minimal working example of a rule that can exploit the infrast
 The [`readability-suspicious-call-argument`](http://releases.llvm.org/13.0.1/tools/clang/tools/extra/docs/clang-tidy/checks/readability-suspicious-call-argument.html) check currently only checks every parameter and argument name against one another, for each call site.
 However, the *name-based* detection of *argument selection defects* have existing literature[^2][^3] that seem to indicate that in some cases, the ability to witness the pattern how people call the function may indicate that it was in fact the **parameter** that had a naming convention violation, and all the call sites are as intended.
 
+[^1]: [Unity build](http://enwp.org/Unity_build) is a technique where the entire project is formatted into a **single** translation unit (or a very small number of translation units), which is then compiled. This usually allows for more optimisations to take place.
 [^2]: Andrew Rice, et al.: *Detecting argument selection defects*, OOPSLA 2017, pp. 1-22, [doi://10.1145/3133928](http://doi.org/10.1145/3133928)
 [^3]: Michael Pradel, Thomas R. Gross: *Detecting anomalies in the order of equally-typed method arguments*, ISSTA 2011, pp. 232-242, [doi://10.1145/2001420.2001448](http://doi.org/10.1145/2001420.2001448)
 
@@ -61,11 +61,11 @@ This check could be first extended to collect information across all call sites 
 
 ### Theoretical example: superfluous `friend` declarations
 
-The last example for which I am unable to link existing implementation is the problem of having too wide `friend` declarations. [^4]
-Some measurements can be found in [this PhD thesis](http://martong.github.io/gabor-marton-phd-thesis.pdf)
+The last example for which I am unable to link existing implementation is the problem of having too wide `friend` declarations.[^4]
+Some actual measurements on live projects can be found in the PhD thesis investigating "selective friends".
 It is easy to imagine a check that would be able to collect how many `friend` declarations actually use private symbols, and suggest not breaking encapsulation where it is not needed based on the current source code.
 
-[^4] Gábor Márton: *Tools and Language Elements for Testing, Encapsulation and Controlling Abstraction in Large-Scale C++ Projects*, Ph.D. thesis, [URL](http://martong.github.io/gabor-marton-phd-thesis.pdf). The related part is found in Chapter 3 *Selective friend*, pp. 78-118.
+[^4]: Gábor Márton: *Tools and Language Elements for Testing, Encapsulation and Controlling Abstraction in Large-Scale C++ Projects*, Ph.D. thesis, [http://martong.github.io](http://martong.github.io/gabor-marton-phd-thesis.pdf). The related part is found in Chapter 3 *Selective friend*, pp. 78-118.
 
 
 Classification
@@ -112,7 +112,7 @@ In the current implementation proposal, it is achieved by saving the internal da
 The **collect** phase shall be possible to be executed in parallel, to support existing driver infrastructures like *CodeChecker*.
 This is almost trivially achieved by designating for each input translation unit its own unique output file.
 There is an ongoing question for cases where the same source file is compiled multiple times (with different configurations) in the same build cycle and analysis invocation.
-This question has theoretical implication (e.g., **"Should two almost-identical compilations of the same file count everything twice in a check like *MDRV*?"**) and technical depth as to how to achieve separation.
+This question has theoretical implication (e.g., **"Should two almost-identical compilations of the same file count everything twice in a check like *`MDRV`*?"**) and technical depth as to how to achieve separation.
 Trivial separation might be achieved by hashing the compile command vector into the output file's pattern.
 Our suggestion is for now to accept skewed statistics if the "same" entity (source file) is found multiple times in the measured "population".
 (A better solution to this problem shall be discussed on the *JSON Compilation Database* level, or in conjunction with build system engineers, and not a problem that should be solved directly within Clang-Tidy.)
