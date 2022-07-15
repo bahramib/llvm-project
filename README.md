@@ -1,6 +1,8 @@
 Enhancing Clang-Tidy with project-level knowledge
 =================================================
 
+> The phrases *"MUST"*, "*SHOULD*", "*MIGHT*", etc. when emphasised ***SHOULD*** be understood as per [IEEE RFC 2119](http://datatracker.ietf.org/doc/html/rfc2119).
+
 There are several classes of problems for which analysis rules are easily expressed as Clang-Tidy checks, but could not be reasonably found with the current infrastructure.
 We will hereby refer these -- after the most significant family of such rules, and a previous parallel implementation in the *Clang Static Analyser* -- as **"statistical checkers"**.
 
@@ -75,9 +77,9 @@ In the following, we'll generally classify **problems** (that are found by *chec
 This is only for exposition in this proposal, and do not directly translate to any code-level constructs.
 
  1. Problems that are only meaningful locally. E.g., *"use lambda instead of `std::bind`"*.
- 2. Problems that *MIGHT* be meaningful locally, but the diagnostics are improved by project-level knowledge.
+ 2. Problems that **might be** meaningful locally, but the diagnostics are improved by project-level knowledge.
     Most *statistical checks*, including the first two of the previous examples, fall into this category.
- 3. Problems that are **ONLY** meaningful when executed as a whole-project analysis.
+ 3. Problems that are **only** meaningful when executed as a whole-project analysis.
     The last example about `friend` declarations fit into this category.
 
 Infrastructure proposal (summary)
@@ -101,6 +103,9 @@ For the execution of Clang-Tidy, two new parameters are introduced:
  * `--multipass-phase`, which sets the executing binary into one of the three phases
  * `--multipass-dir`, which specifies a data directory which acts as persistence between parallel processes and the phases themselves
 
+These parameters are crucial only for the driving of the multi-pass analysis, and deal with pseudo-temporary data.
+As such, they ***SHOULD NOT*** be exposed and configurable via the `.clang-tidy` file.
+
 ### The three phases
 
 #### Collecting per-TU data
@@ -109,7 +114,7 @@ In the **collect** phase, the checks receive the matched nodes as normal, but ar
 The collect phase ends with the serialisation of the obtained **"per-TU"** data to some data store.
 In the current implementation proposal, it is achieved by saving the internal data structure to a file (within `--multipass-dir`, having a name derived from a pattern, not in the control of the check in particular!).
 
-The **collect** phase shall be possible to be executed in parallel, to support existing driver infrastructures like *CodeChecker*.
+The **collect** phase ***MUST*** be possible to be executed in parallel, to support existing driver infrastructures like *CodeChecker*.
 This is almost trivially achieved by designating for each input translation unit its own unique output file.
 There is an ongoing question for cases where the same source file is compiled multiple times (with different configurations) in the same build cycle and analysis invocation.
 This question has theoretical implication (e.g., **"Should two almost-identical compilations of the same file count everything twice in a check like *`MDRV`*?"**) and technical depth as to how to achieve separation.
@@ -121,10 +126,81 @@ Our suggestion is for now to accept skewed statistics if the "same" entity (sour
 
 In the second phase, **compact**, checks should create a project-level sum of the obtained per-TU data.
 This operation should be achieved without reliance on the actual source code (i.e., the ASTs).
+The *"reduce"* operation's input and output format need not be the same, to support representations appropriate for different classes of problems.
+The output of this phase is a project-level datafile for each check.
+
+To prevent having to deal with synchronisation issues within the checks themselves, this step is not intended to be run in parallel.
+Semi-parallelism ***MIGHT*** be achieved by running Clang-Tidy invocations separately for each (participating) check with the same `--multipass-dir` input, in which case every process will compact a subset of the input files (keyed by the check's name) into a distinct output file (also keyed by the check's name).
+The suggestion is to support querying capabilities from Clang-Tidy Main, with specifics (such as threading or check selection) implemented in the driver frameworks (IDEs, CodeChecker, custom CI scripts, etc.).
 
 #### Emitting diagnostics
+
+The last phase, **diagnose** deals with actually producing `diag()` calls and user-facing diagnostics.
+For **Category 1** checks, this is the only phase, and for backwards compatibility reasons, this is the *default* phase.
+Checks should be able to obtain the information whether or not data from the previous step is available, in which case they can use it.
+Otherwise, the suggestion is to execute the *"collect"* step and the *"diagnose"* step internally in one go, and produce per-TU diagnostics.
+
+This step ***MUST*** be possible to be executed in parallel.
 
 ### Backwards compatibility
 
 The **diagnose** phase is the default phase if no other option is given, in which case existing checks are expected to behave as before, creating diagnostics based on the data they have available in the translation unit they run on.
 
+Checks are expected to produce no apparent behaviour from the user's point of view (create no files, emit no diagnostics, cause no crashes) in case a previous phase their logic depends on were skipped.
+
+API changes (in detail)
+-----------------------
+
+In the existing [**D124447**](http://reviews.llvm.org/D124447) patch:
+
+ 1. Trivialities:
+   * Extend `ClangTidyCheck` with `protected` support methods which subclasses can use to query information related to the multi-phase architecture.
+   * Write the new command-line options to appropriate query methods.
+ 2. Add a new `collect(MatchResult&)` function that behaves just like `check(MatchResult&)` does, except that it gets called in the 1st phase, while `check` is only called in the 3rd phase.
+ 3. Add the `postCollect()` and `compact()` methods which expose the check-specific implementation for saving and transforming data.
+
+Further options that are not implemented in code yet, but should definitely be considered before merging an implementation:
+
+ * Create a new abstract subclass `MultipassClangTidyCheck <: ClangTidyCheck`, which will require the aforementioned methods to be implemented, without `ClangTidyCheck` defaulting them to empty functions. This could allow exposing the fact that check X supports the proposed architecture to prevent even the instantiation of a check that is not capable of running in phase K, instead of being called with empty inputs or produce empty results.
+ * The same option but instead of wedging in a node in the hierarchy, just expose the same information by `virtual bool` functions.
+ * Adding a "middleclass" would allow for exposing some common logic (e.g., caching whether loading phase-2 compacted data in phase-3 was successful?) instead of having every check depend on it.
+ * Should we **hard require** the use of YAML format?
+
+In practice: Implementing the infrastructure changes for `misc-discarded-return-value`
+--------------------------------------------------------------------------------------
+
+Patch [**D124448**](http://reviews.llvm.org/D124448) shows how an existing (at least considering the point-of-view of that particular patch, as *MDRV* is not yet merged at the time of writing this post!) check is refactored to support the proposed changes.
+The changes here are small, mostly because the per-TU and the project-level data is expressed in the exact same format.
+
+
+Workflow case studies
+---------------------
+
+### Not using the proposed architecture at all
+
+In this case, no functional changes are observed.
+`--multipass-phase=diagnose` is set in the command-line automatically as an implicit default, and existing checks will execute their `check()` callback, business as usual.
+
+### One pass of either current per-TU or proposed project-level analysis, e.g., in (non-distributed) CI
+
+In this case, no *significant* changes are observed.
+The executing environment needs to specify the appropriate flags in the proper order,
+
+
+
+Appendix A. Side considerations for *"statistical checks"*
+----------------------------------------------------------
+
+As mentioned earlier, the main motivating example for this check is to give infrastructure-level support for a category of problems that could be found with checks but only if project-level information, usually statistical information, is available.
+Usually, intra-TU statistics are gathered by associating a data structure that is "keyed" by AST nodes, which die when Clang-Tidy switches between analysing subsequent ASTs.
+Unless careful consideration is made by the developer to wipe the data structure fields in `on(Start|End)TranslationUnit()`, there is a serious issue with keeping potential dangling references, which might never surface a crash or bug in production if Clang-Tidy is executed with per-file parallelism (e.g., via a driver script such as CodeChecker).
+
+As of 14.0, a quick search found the following 5 checks to **directly** manage data structures and sub-object ownership in their `on...TU()` methods:
+
+ * `modernize/DeprecatedHeadersCheck.cpp`
+ * `mpi/BufferDerefCheck.cpp`
+ * `mpi/TypeMismatchCheck.cpp`
+ * `performance/UnnecessaryValueParamCheck.cpp`
+ * `readability/BracesAroundStatementsCheck.cpp`
+
+We suggest to investigate the means of creating a contextual object that can be more easily expressed to contain AST-node specific data, and the clean-up of these data structures should be driven by Tidy's core, instead of each check doing it manually.
