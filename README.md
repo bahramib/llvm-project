@@ -54,20 +54,22 @@ This check is the minimal working example of a rule that can exploit the infrast
 
 The [`readability-suspicious-call-argument`](http://releases.llvm.org/13.0.1/tools/clang/tools/extra/docs/clang-tidy/checks/readability-suspicious-call-argument.html) check currently only checks every parameter and argument name against one another, for each call site.
 However, the *name-based* detection of *argument selection defects* have existing literature[^2][^3] that seem to indicate that in some cases, the ability to witness the pattern how people call the function may indicate that it was in fact the **parameter** that had a naming convention violation, and all the call sites are as intended.
+It must be noted that this analysis rule is implemented downstream by a third-party in a way that the project-level information is stored in an SQLite database,[^4] and the analysis itself executes as a *CSA* plug-in (which gives the execution environment the ability to load external libraries like SQLite).
 
 [^1]: [Unity build](http://enwp.org/Unity_build) is a technique where the entire project is formatted into a **single** translation unit (or a very small number of translation units), which is then compiled. This usually allows for more optimisations to take place.
 [^2]: Andrew Rice, et al.: *Detecting argument selection defects*, OOPSLA 2017, pp. 1-22, [doi://10.1145/3133928](http://doi.org/10.1145/3133928)
 [^3]: Michael Pradel, Thomas R. Gross: *Detecting anomalies in the order of equally-typed method arguments*, ISSTA 2011, pp. 232-242, [doi://10.1145/2001420.2001448](http://doi.org/10.1145/2001420.2001448)
+[^4]: GrammaTech Inc.: Swap Detector - A library for detecting swapped arguments in function calls, [GitHub://@GrammaTech/swap-detector](http://github.com/GrammaTech/swap-detector)
 
 This check could be first extended to collect information across all call sites investigated by it, and then extended to use all name pairs from the entire project, to be able to calculate more versatile metrics.
 
 ### Theoretical example: superfluous `friend` declarations
 
-The last example for which I am unable to link existing implementation is the problem of having too wide `friend` declarations.[^4]
+The last example for which I am unable to link existing implementation is the problem of having too wide `friend` declarations.[^5]
 Some actual measurements on live projects can be found in the PhD thesis investigating "selective friends".
 It is easy to imagine a check that would be able to collect how many `friend` declarations actually use private symbols, and suggest not breaking encapsulation where it is not needed based on the current source code.
 
-[^4]: Gábor Márton: *Tools and Language Elements for Testing, Encapsulation and Controlling Abstraction in Large-Scale C++ Projects*, Ph.D. thesis, [http://martong.github.io](http://martong.github.io/gabor-marton-phd-thesis.pdf). The related part is found in Chapter 3 *Selective friend*, pp. 78-118.
+[^5]: Gábor Márton: *Tools and Language Elements for Testing, Encapsulation and Controlling Abstraction in Large-Scale C++ Projects*, Ph.D. thesis, [http://martong.github.io](http://martong.github.io/gabor-marton-phd-thesis.pdf). The related part is found in Chapter 3 *Selective friend*, pp. 78-118.
 
 
 Classification
@@ -184,9 +186,56 @@ In this case, no functional changes are observed.
 ### One pass of either current per-TU or proposed project-level analysis, e.g., in (non-distributed) CI
 
 In this case, no *significant* changes are observed.
-The executing environment needs to specify the appropriate flags in the proper order,
+The only concern is that the executing environment needs to specify the appropriate flags in the proper order.
+There is no *user-friendly* support for the driving of this feature however, but we expect it not to be a significant challenge.
+We intend to develop support for this feature in *CodeChecker* as soon as possible, and given our previous experience with *CTU*, do not expect it to be a challenge.[^6]
 
+[^6]: A hack that was used to create the baseline data for some of the measurements found in the comments of [**D124446**](http://reviews.llvm.org/D124446) can be found here: [GitHub://@whisperity/CodeChecker:hack-multipass-tidy-hijacking//CodeChecker-Hijacker.sh](http://github.com/whisperity/CodeChecker/blob/hack-multipass-tidy-hijacking/CodeChecker-Hijacker.sh#L82). It should be noted that CodeChecker already uses a semi-temporary directory for the handling of the analysis, so all this script does is point `--multipass-dir` to an appropriately named directory.
 
+### Incremental analysis (most importantly *IDE*s)
+
+The biggest challenge in terms of design comes with facilitating incremental analysis, i.e., when the developer intends to receive diagnostics for a source file that is currently being actively worked on.
+We believe it is a reasonable assumption that a development environment knows at least the list of files that need an analysis.
+In case a single file has changed, the pipeline needs to be re-evaluated for that file only.
+Conveniently, the *compact* phase does **NOT** require source files as an argument, as it deals with a set of already stored data in a directory tree!
+
+ * Put simply, what needs to happen is execute the first phase for the changed file, which will create an updated data output (per check).
+ * Then, the *compact* step will re-"sum" the project-level information.
+ * After which, the *diagnose* step, executed again for only the changed source file, will match and create diagnostics using the updated project-level information.
+
+However, in this configuration, the *compact* step requires a potentially computationally intensive action to be done over and over again for which barely any of the input itself changed.
+Consider that during the development of a Clang-Tidy check, we have somewhere about 2500 TUs, but usually only change *one*...
+To combat the need for memoising data, there are two potential choices.
+
+#### External: Partial sums
+
+Partial sums refer to creating a *compact* output for a subset of the project and then using this single, already calculated file and the results from the updated TU, to create the full picture that contains data for the entire project.
+This method should be (mathematically) possible for every check to implement due to the nature of "populations" in statistics, but needs support from the driving environment.
+In the current submitted patch, [**D124447**](http://reviews.llvm.org/D124447), the partial sum method works out of the box (from Tidy's perspective), assuming that the driver will:
+
+ 1. Delete the resulting datafile for the changing TU
+ 2. Call *compact* to create a project-level datafile for all except the current TU
+ 3. Keep this saved up somewhere to be able to "re-compact" with every change to the current TU
+
+Importantly, partial sums require only "forward" progress and needs no specific *additional* work from check developers, unlike...
+
+#### Internal: Inverse *compact*
+
+In this **hypothetical** mode, checks ***MUST*** implement the inverse of the *compact* operation, i.e., removing the "contents" of one datafile from the already loaded data.
+This way, if we assume that for each TU we can store not just the newest, but the second newest datafile, the *compact* operation could:
+
+ 1. Load the already compacted project-level data (that was created from an older snapshot)
+ 2. Perform the inverse operation on this data and remove the TU's second oldest information
+ 3. Add the TU's newest information in
+ 4. Save
+
+This option would lessen the need of managing the partial sums on the file system level, but cause more requirements from check authors.
+For only changing a few files, it does not seem that this might be worth it, but this approach could help in case the amount of changed files fluctuates.
+
+### Distributed analysis
+
+The biggest open question is fully distributed analysis.
+However, we believe that -- thanks to the discrete steps taken in the multi-pass analysis -- we can consider the resulting data files as outputs and inputs of each individual step, and synchronisation could be achieved by the facilitator of the distributed nature.
 
 Appendix A. Side considerations for *"statistical checks"*
 ----------------------------------------------------------
