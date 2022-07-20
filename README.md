@@ -1,8 +1,6 @@
 Enhancing Clang-Tidy with project-level knowledge
 =================================================
 
-> The phrases *"MUST"*, "*SHOULD*", "*MIGHT*", etc. when emphasised ***SHOULD*** be understood as per [IEEE RFC 2119](http://datatracker.ietf.org/doc/html/rfc2119).
-
 There are several classes of problems for which analysis rules are easily expressed as Clang-Tidy checks, but could not be reasonably found with the current infrastructure.
 We will hereby refer these -- after the most significant family of such rules, and a previous parallel implementation in the *Clang Static Analyser* -- as **"statistical checkers"**.
 
@@ -65,12 +63,17 @@ This check could be first extended to collect information across all call sites 
 
 ### Theoretical example: superfluous `friend` declarations
 
-The last example for which I am unable to link existing implementation is the problem of having too wide `friend` declarations.[^5]
-Some actual measurements on live projects can be found in the PhD thesis investigating "selective friends".
+A colleague of mine had previous research that involved searching for issues related to `friend` declarations.[^5][^6]
+Some actual measurements on live projects can be found in the PhD thesis investigating *"selective friends"*.
 It is easy to imagine a check that would be able to collect how many `friend` declarations actually use private symbols, and suggest not breaking encapsulation where it is not needed based on the current source code.
 
 [^5]: Gábor Márton: *Tools and Language Elements for Testing, Encapsulation and Controlling Abstraction in Large-Scale C++ Projects*, Ph.D. thesis, [http://martong.github.io](http://martong.github.io/gabor-marton-phd-thesis.pdf). The related part is found in Chapter 3 *Selective friend*, pp. 78-118.
+[^6]: Gábor Márton: *Warnings and statistics about false C++ friend usage*, [GitHub://@martong/friend-stats](http://github.com/martong/friend-stats).
 
+Improvements to *existing* checks
+---------------------------------
+
+Due to this proposal being about enabling a whole new set of problems to be expressed, we do not believe that the already existing checks in their current form could be meaningfully extended to this infrastructure -- except for `readability-suspicious-call-argument` as discussed above.
 
 Classification
 --------------
@@ -188,9 +191,9 @@ In this case, no functional changes are observed.
 In this case, no *significant* changes are observed.
 The only concern is that the executing environment needs to specify the appropriate flags in the proper order.
 There is no *user-friendly* support for the driving of this feature however, but we expect it not to be a significant challenge.
-We intend to develop support for this feature in *CodeChecker* as soon as possible, and given our previous experience with *CTU*, do not expect it to be a challenge.[^6]
+We intend to develop support for this feature in *CodeChecker* as soon as possible, and given our previous experience with *CTU*, do not expect it to be a challenge.[^7]
 
-[^6]: A hack that was used to create the baseline data for some of the measurements found in the comments of [**D124446**](http://reviews.llvm.org/D124446) can be found here: [GitHub://@whisperity/CodeChecker:hack-multipass-tidy-hijacking//CodeChecker-Hijacker.sh](http://github.com/whisperity/CodeChecker/blob/hack-multipass-tidy-hijacking/CodeChecker-Hijacker.sh#L82). It should be noted that CodeChecker already uses a semi-temporary directory for the handling of the analysis, so all this script does is point `--multipass-dir` to an appropriately named directory.
+[^7]: A hack that was used to create the baseline data for some of the measurements found in the comments of [**D124446**](http://reviews.llvm.org/D124446) can be found here: [GitHub://@whisperity/CodeChecker:hack-multipass-tidy-hijacking//CodeChecker-Hijacker.sh](http://github.com/whisperity/CodeChecker/blob/hack-multipass-tidy-hijacking/CodeChecker-Hijacker.sh#L82). It should be noted that CodeChecker already uses a semi-temporary directory for the handling of the analysis, so all this script does is point `--multipass-dir` to an appropriately named directory.
 
 ### Incremental analysis (most importantly *IDE*s)
 
@@ -226,8 +229,8 @@ This way, if we assume that for each TU we can store not just the newest, but th
 
  1. Load the already compacted project-level data (that was created from an older snapshot)
  2. Perform the inverse operation on this data and remove the TU's second oldest information
- 3. Add the TU's newest information in
- 4. Save
+ 3. Add the TU's newest information in to the existing data (that no longer contains the values from the old TU)
+ 4. Save this data to be used in the *diagnose* step
 
 This option would lessen the need of managing the partial sums on the file system level, but cause more requirements from check authors.
 For only changing a few files, it does not seem that this might be worth it, but this approach could help in case the amount of changed files fluctuates.
@@ -235,10 +238,10 @@ For only changing a few files, it does not seem that this might be worth it, but
 ### Distributed analysis
 
 The biggest open question is fully distributed analysis.
-However, we believe that -- thanks to the discrete steps taken in the multi-pass analysis -- we can consider the resulting data files as outputs and inputs of each individual step, and synchronisation could be achieved by the facilitator of the distributed nature.
+However, we believe that -- thanks to the discrete steps taken in the multi-pass analysis -- we can consider the resulting data files as outputs and inputs of each individual step, and synchronisation could be achieved by the facilitator of the distributed nature, just like how a distributed build environment is capable of collecting the object files (outputs of the build step).
 
-Appendix A. Side considerations for *"statistical checks"*
-----------------------------------------------------------
+Appendix A. Miscellaneous considerations for *"statistical checks"*
+-------------------------------------------------------------------
 
 As mentioned earlier, the main motivating example for this check is to give infrastructure-level support for a category of problems that could be found with checks but only if project-level information, usually statistical information, is available.
 Usually, intra-TU statistics are gathered by associating a data structure that is "keyed" by AST nodes, which die when Clang-Tidy switches between analysing subsequent ASTs.
