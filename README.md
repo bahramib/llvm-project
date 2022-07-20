@@ -1,5 +1,4 @@
-Enhancing Clang-Tidy with project-level knowledge
-=================================================
+# Enhancing Clang-Tidy with project-level knowledge
 
 There are several classes of problems for which analysis rules are easily expressed as Clang-Tidy checks, but could not be reasonably found with the current infrastructure.
 We will hereby refer these -- after the most significant family of such rules, and a previous parallel implementation in the *Clang Static Analyser* -- as **"statistical checkers"**.
@@ -10,8 +9,7 @@ This rules out the option to implement a statistical check in a meaningful way w
 
 The situation is even worse if multiple `clang-tidy` binaries execute in parallel, in which case the instantiated objects have no meaningful way of cooperation!
 
-Related Work
-------------
+## Related Work
 
 When discussing this problem, we built heavily on existing experience with two major technologies.
 The first being [*MapReduce*](http://enwp.org/MapReduce), with which parallels in our proposed new architecture is not a coincidence.
@@ -25,8 +23,13 @@ The full [overview documentation](http://clang.llvm.org/docs/analyzer/user-docs/
 According to CodeChecker's documentation, there is an [existing support for statistical analysis](http://codechecker.readthedocs.io/en/v6.18.2/analyzer/user_guide/#statistical-analysis-mode), but unfortunately I was unable to find public resources for the mentioned `statisticsCollector.ReturnValueCheck` or `statisticsCollector.SpecialReturnValue` checkers.
 Our proposed infrastructure mirrors that of these checks, with a separate collect and diagnosis phase.
 
-Motivating examples
--------------------
+## Visual overview
+
+![Existing (and the proposed backwards-compatible) architecture in "single-pass" mode where each matcher matches on each AST (if multiple are supplied) and diagnostics are emitted.](https://raw.githubusercontent.com/bahramib/llvm-project/clang-tidy/multipass-tidy-proposal/img/Single-Mode.png)
+![The proposed architecture is visualised with the three distinct phases: collect, compact, and diagnose.](https://raw.githubusercontent.com/bahramib/llvm-project/clang-tidy/multipass-tidy-proposal/img/Multi-Mode.png)
+
+
+## Motivating examples
 
 ### Main example: `misc-discarded-return-value` (*MDRV*)
 
@@ -70,13 +73,11 @@ It is easy to imagine a check that would be able to collect how many `friend` de
 [^5]: Gábor Márton: *Tools and Language Elements for Testing, Encapsulation and Controlling Abstraction in Large-Scale C++ Projects*, Ph.D. thesis, [http://martong.github.io](http://martong.github.io/gabor-marton-phd-thesis.pdf). The related part is found in Chapter 3 *Selective friend*, pp. 78-118.
 [^6]: Gábor Márton: *Warnings and statistics about false C++ friend usage*, [GitHub://@martong/friend-stats](http://github.com/martong/friend-stats).
 
-Improvements to *existing* checks
----------------------------------
+## Improvements to *existing* checks
 
 Due to this proposal being about enabling a whole new set of problems to be expressed, we do not believe that the already existing checks in their current form could be meaningfully extended to this infrastructure -- except for `readability-suspicious-call-argument` as discussed above.
 
-Classification
---------------
+## Classification
 
 In the following, we'll generally classify **problems** (that are found by *checks*) into three categories.
 This is only for exposition in this proposal, and do not directly translate to any code-level constructs.
@@ -87,8 +88,7 @@ This is only for exposition in this proposal, and do not directly translate to a
  3. Problems that are **only** meaningful when executed as a whole-project analysis.
     The last example about `friend` declarations fit into this category.
 
-Infrastructure proposal (summary)
----------------------------------
+## Infrastructure proposal (summary)
 
 The proposal is to implement a map-reduce-like infrastructure into Clang-Tidy.
 We note that due to each check being unique without an underlying "expression evaluator" like in *CSA*, the infrastructure changes are more invasive than *CTU* in *CSA*.
@@ -153,8 +153,7 @@ The **diagnose** phase is the default phase if no other option is given, in whic
 
 Checks are expected to produce no apparent behaviour from the user's point of view (create no files, emit no diagnostics, cause no crashes) in case a previous phase their logic depends on were skipped.
 
-API changes (in detail)
------------------------
+## API changes (in detail)
 
 In the existing [**D124447**](http://reviews.llvm.org/D124447) patch:
 
@@ -171,15 +170,13 @@ Further options that are not implemented in code yet, but should definitely be c
  * Adding a "middleclass" would allow for exposing some common logic (e.g., caching whether loading phase-2 compacted data in phase-3 was successful?) instead of having every check depend on it.
  * Should we **hard require** the use of YAML format?
 
-In practice: Implementing the infrastructure changes for `misc-discarded-return-value`
---------------------------------------------------------------------------------------
+## In practice: Implementing the infrastructure changes for `misc-discarded-return-value`
 
 Patch [**D124448**](http://reviews.llvm.org/D124448) shows how an existing (at least considering the point-of-view of that particular patch, as *MDRV* is not yet merged at the time of writing this post!) check is refactored to support the proposed changes.
 The changes here are small, mostly because the per-TU and the project-level data is expressed in the exact same format.
 
 
-Workflow case studies
----------------------
+## Workflow case studies
 
 ### Not using the proposed architecture at all
 
@@ -240,8 +237,7 @@ For only changing a few files, it does not seem that this might be worth it, but
 The biggest open question is fully distributed analysis.
 However, we believe that -- thanks to the discrete steps taken in the multi-pass analysis -- we can consider the resulting data files as outputs and inputs of each individual step, and synchronisation could be achieved by the facilitator of the distributed nature, just like how a distributed build environment is capable of collecting the object files (outputs of the build step).
 
-Appendix A. Miscellaneous considerations for *"statistical checks"*
--------------------------------------------------------------------
+## Appendix A. Miscellaneous considerations for *"statistical checks"*
 
 As mentioned earlier, the main motivating example for this check is to give infrastructure-level support for a category of problems that could be found with checks but only if project-level information, usually statistical information, is available.
 Usually, intra-TU statistics are gathered by associating a data structure that is "keyed" by AST nodes, which die when Clang-Tidy switches between analysing subsequent ASTs.
@@ -255,4 +251,16 @@ As of 14.0, a quick search found the following 5 checks to **directly** manage d
  * `performance/UnnecessaryValueParamCheck.cpp`
  * `readability/BracesAroundStatementsCheck.cpp`
 
-We suggest to investigate the means of creating a contextual object that can be more easily expressed to contain AST-node specific data, and the clean-up of these data structures should be driven by Tidy's core, instead of each check doing it manually.
+We suggest investigating the means of creating a contextual object that can be more easily expressed to contain AST-node-specific data, and the clean-up of these data structures should be driven by Tidy's core, instead of each check doing it manually.
+
+## Appendix B. Reliably identifying "nodes" across TUs
+
+There are several existing methods for establishing an *"equality"* between nodes (mostly declarations) that are supported by Clang already: the ODR hash, the USR (which is used by *CTU* for lookup), and even transitive structural equivalence (the latter used by the *AST Importer* which *CTU* calls to actually load trees).
+In *MDRV*, we opted for using *USR* as it was the most meaningful to appear in a serialisation format.
+However, neither of these formats produces entirely unique keys, as we identified during the development of *MDRV*.[^8]
+We believe that *USR* is still the best suggestion for declarations without having to invent our own equality tool within Tidy itself, and check authors may rely on USR and accept that some bugs arise from using a (from the point of view of the check) outside library.
+
+In the future, we suggest revisiting the idea -- perhaps together with a generic solution to *Appendix A.* -- of creating a Tidy-level library that helps with assigning data to "nodes" to hoist, abstract away and generalise the generation of "node keys".
+But this is not directly part of this proposal.
+
+[^8]: See [D124446@425182#1202815](http://reviews.llvm.org/D124446?id=425182#inline-1202815).
